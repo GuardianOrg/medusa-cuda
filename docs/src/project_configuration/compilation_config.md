@@ -52,6 +52,23 @@ The compilation configuration defines the parameters to use while compiling a ta
   > Re-using these flags in `args` will cause the compilation to fail.
 - **Default**: `[]`
 
+#### Foundry projects built with Solar
+
+Medusa supports Foundry projects compiled with [Solar](https://github.com/paradigmxyz/solar) (`solc = "solar"` in
+`foundry.toml`). No configuration is needed.
+
+A source map names each file by the id its compiler gave it. solc numbers a project's files in path order, the order
+crytic-compile lists them in. Solar numbers them in another order, so medusa reads each file's id from:
+
+1. the file's AST, which solc writes, and Solar writes from
+   [paradigmxyz/solar#2344](https://github.com/paradigmxyz/solar/pull/2344) on;
+2. otherwise, for a unit Foundry built with Solar, the `source_id_to_path` of its build-info in `<out>/build-info`,
+   where `<out>` is the `--foundry-out-directory` given in `args`, or else the out directory of `forge config --json`;
+3. otherwise, the file's position in crytic-compile's `sourceList`.
+
+When a Solar build without ASTs matches no build-info, medusa logs a warning, since its coverage may then be reported on
+the wrong files. Solar versions without ASTs also give medusa no contract kinds, so set `targetContracts` explicitly.
+
 ### `platformConfig` for `solc`
 
 #### `target`
