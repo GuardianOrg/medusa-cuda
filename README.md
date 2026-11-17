@@ -2,8 +2,8 @@
 The integration of CuEVM to Medusa 1.2.1. Beyond medusa `assertion` bug type, it supports more common bug type (Integer Overflow, Leaking Ether, Reentrancy) with the oracles written inside CuEVM. 
 
 Extra features:
-- Source line mapping to report bugs in solidity line number. Achieved by our [solc-json-parser](https://github.com/sbip-sg/solc-json-parser)
-- Simple false positve reduction by pattern matching in solidity source.
+- Source line mapping to report bugs in solidity line number. Each bug's PC is mapped with the source map of the bytecode medusa compiled and fuzzed, so it works for solc and [Solar](https://github.com/paradigmxyz/solar) builds alike. The result is in `bugs.json` (`source`: path, line numbers and code) and in the logs. `scripts/extract_bugs.py` uses it, and only falls back to [solc-json-parser](https://github.com/sbip-sg/solc-json-parser) for bugs without it.
+- Simple false positive reduction by pattern matching in solidity source (`fuzzing/bugfilter`). An integer bug is dropped when its code lacks the operator, spans a whole definition, is compiler-generated (solc's checked arithmetic helpers), or is checked arithmetic outside `unchecked` and `assembly` blocks (Solidity 0.8+ and Solar, where an overflow reverts).
 - Extra flags for configuring `gpuWorkers`, `cpuWorkers`, `callSequenceLength`, `skipSolcInstall`, `etherscanJsonFile`. 
 
 >The most important flags are cpu workers (> CPU 8 threads) and gpu workers (> 32768 GPU threads, depending on GPU memory).

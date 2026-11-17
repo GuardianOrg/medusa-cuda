@@ -10,6 +10,7 @@ import (
 	"github.com/crytic/medusa/logging/colors"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
+	compilationTypes "github.com/crytic/medusa/compilation/types"
 	"github.com/crytic/medusa/fuzzing/calls"
 	fuzzerTypes "github.com/crytic/medusa/fuzzing/contracts"
 )
@@ -68,6 +69,17 @@ type AssertionTestCase struct {
 	bugType         uint32  `json:"bugType"`
 	bugContractName string  `json:"bugContractName"`
 	bugTime         float64 `json:"bugTime"`
+	// bugContractId is the last byte of the address of the contract whose code the bug's PC is in, as CuEVM reports it
+	bugContractId uint32
+	// bugSource is the source code the bug's PC maps to in the target contract, or nil when it is unknown
+	bugSource *compilationTypes.SourceRange
+}
+
+// bugSourceJSON describes the source code a bug's PC maps to, in bugs.json.
+type bugSourceJSON struct {
+	Path       string `json:"path"`
+	LineNumber [2]int `json:"lineNumber"`
+	Fragment   string `json:"fragment"`
 }
 
 // Status describes the TestCaseStatus used to define the current state of the test.
@@ -95,6 +107,10 @@ func (t *AssertionTestCase) LogMessage() *logging.LogBuffer {
 		buffer.Append(colors.RedBold, fmt.Sprintf("[%s] ", t.Status()), colors.Bold, t.Name(), colors.Reset, "\n")
 		buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" resulted in an %s after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig, bugTypeName(t.bugType)))
 		buffer.Append(fmt.Sprintf("Bug PC: %d\n", t.bugPC))
+		if t.bugSource != nil && !t.bugSource.IsGenerated() {
+			buffer.Append(fmt.Sprintf("Bug source: %s:%d: %s\n", t.bugSource.SourcePath, t.bugSource.StartLine,
+				strings.TrimSpace(t.bugSource.Fragment)))
+		}
 		buffer.Append(colors.Bold, "[Call Sequence]", colors.Reset, "\n")
 		buffer.Append(t.CallSequence().Log().Elements()...)
 		return buffer
@@ -121,6 +137,17 @@ func (t *AssertionTestCase) ID() string {
 
 // MarshalJSON provides custom JSON marshalling for the struct.
 func (t *AssertionTestCase) MarshalJSON() ([]byte, error) {
+	// The source the bug's PC maps to, resolved with the compiler output medusa fuzzed (solc or Solar), so that
+	// scripts/extract_bugs.py does not need to compile again.
+	var source *bugSourceJSON
+	if t.bugSource != nil && !t.bugSource.IsGenerated() {
+		source = &bugSourceJSON{
+			Path:       t.bugSource.SourcePath,
+			LineNumber: [2]int{t.bugSource.StartLine, t.bugSource.EndLine},
+			Fragment:   strings.TrimSpace(t.bugSource.Fragment),
+		}
+	}
+
 	// Create a struct with exported fields for JSON marshaling
 	return json.Marshal(struct {
 		TargetMethod    string              `json:"method"`
@@ -130,6 +157,7 @@ func (t *AssertionTestCase) MarshalJSON() ([]byte, error) {
 		BugContractName string              `json:"bugContractName"`
 		BugTime         string              `json:"bugTime"`
 		ID              string              `json:"id"`
+		Source          *bugSourceJSON      `json:"source,omitempty"`
 	}{
 
 		TargetMethod:    t.targetMethod.Sig,
@@ -139,5 +167,6 @@ func (t *AssertionTestCase) MarshalJSON() ([]byte, error) {
 		BugContractName: t.bugContractName,
 		BugTime:         strconv.FormatFloat(t.bugTime, 'f', 2, 64),
 		ID:              t.ID(),
+		Source:          source,
 	})
 }

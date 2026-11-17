@@ -2,6 +2,10 @@
 """
 Filter and extract bugs from the bugs.json output file.
 Extract source line information using PC values and contract names.
+
+medusa writes each bug's source (path, line numbers and code) into bugs.json, mapped with the source map of the
+bytecode it fuzzed, so it is right for solc and Solar builds. That source is used as is. Only a bug without one (from
+an older bugs.json) is mapped by compiling the target again with solc, which is wrong for a project built with Solar.
 """
 
 import json
@@ -19,9 +23,9 @@ if os.path.exists(smart_fuzz_path):
 try:
     from solc_json_parser.combined_json_parser import CombinedJsonParser as SolidityAst
 except ImportError as e:
-    print(f"Error importing solc_json_parser: {e}")
-    print("Please ensure smart-fuzz dependencies are available")
-    sys.exit(1)
+    # Only needed for bugs.json files written before medusa recorded each bug's source.
+    SolidityAst = None
+    SOLIDITY_AST_IMPORT_ERROR = e
 
 
 def load_bugs_json(bugs_file: str) -> List[Dict]:
@@ -47,7 +51,7 @@ def load_medusa_config(config_file: str) -> Dict:
         return {}
 
 
-def extract_source_info_from_pc(pc: int, contract_name: str, ast: SolidityAst) -> Dict:
+def extract_source_info_from_pc(pc: int, contract_name: str, ast) -> Dict:
     """
     Extract source line information from PC using SolidityAst.
     
@@ -98,6 +102,46 @@ def extract_source_info_from_pc(pc: int, contract_name: str, ast: SolidityAst) -
         }
 
 
+def create_solc_ast(medusa_config: Dict):
+    """
+    Compile the target in the medusa config with solc and return its AST parser, or None if that fails.
+    """
+    if SolidityAst is None:
+        print(f"Error importing solc_json_parser: {SOLIDITY_AST_IMPORT_ERROR}")
+        print("Please ensure smart-fuzz dependencies are available")
+        return None
+
+    # Get source file from medusa config
+    platform_config = medusa_config.get('compilation', {}).get('platformConfig', {})
+    target_file = platform_config.get('target', '')
+    compiler_version = platform_config.get('solcVersion', '')
+
+    if not target_file:
+        print("Warning: No target file found in medusa config")
+        return None
+
+    # Construct full path to source file
+    source_path = os.path.abspath(target_file)
+    if not os.path.exists(source_path):
+        print(f"Warning: Source file {source_path} not found")
+        return None
+
+    print(f"Using source file: {source_path}")
+    if compiler_version and compiler_version.strip():
+        print(f"Using compiler version: {compiler_version}")
+
+    try:
+        if compiler_version and compiler_version.strip():
+            ast = SolidityAst(source_path, compiler_version)
+        else:
+            ast = SolidityAst(source_path)
+        print("Successfully created AST parser")
+        return ast
+    except Exception as e:
+        print(f"Error creating AST parser: {e}")
+        return None
+
+
 def process_bugs(bugs: List[Dict], medusa_config: Dict) -> List[Dict]:
     """
     Process bugs to extract source line information.
@@ -110,37 +154,12 @@ def process_bugs(bugs: List[Dict], medusa_config: Dict) -> List[Dict]:
         List of processed bugs with source information
     """
     processed_bugs = []
-    
-    # Get source file from medusa config
-    platform_config = medusa_config.get('compilation', {}).get('platformConfig', {})
-    target_file = platform_config.get('target', '')
-    compiler_version = platform_config.get('solcVersion', '')
-    
-    if not target_file:
-        print("Warning: No target file found in medusa config")
-        return []
-    
-    # Construct full path to source file
-    source_path = os.path.abspath(target_file)
-    if not os.path.exists(source_path):
-        print(f"Warning: Source file {source_path} not found")
-        return []
-    
-    print(f"Using source file: {source_path}")
-    if compiler_version and compiler_version.strip():
-        print(f"Using compiler version: {compiler_version}")
-    
-    # Create AST object once and reuse for all bugs
-    try:
-        if compiler_version and compiler_version.strip():
-            ast = SolidityAst(source_path, compiler_version)
-        else:
-            ast = SolidityAst(source_path)
-        print("Successfully created AST parser")
-    except Exception as e:
-        print(f"Error creating AST parser: {e}")
-        return []
-    
+
+    # The solc AST is only built when a bug has no source recorded by medusa.
+    ast = None
+    if any(not bug.get('source') for bug in bugs):
+        ast = create_solc_ast(medusa_config)
+
     for i, bug in enumerate(bugs):
         try:
             # Extract bug information
@@ -155,8 +174,23 @@ def process_bugs(bugs: List[Dict], medusa_config: Dict) -> List[Dict]:
                 print(f"Warning: No contract name for bug {i}")
                 continue
             
-            # Extract source information using reusable AST object
-            source_info = extract_source_info_from_pc(bug_pc, contract_name, ast)
+            # Use the source medusa recorded, or else map the PC with the solc AST
+            if bug.get('source'):
+                source_info = {
+                    'line_number': bug['source']['lineNumber'],
+                    'fragment': bug['source']['fragment'],
+                    'source_path': bug['source']['path'],
+                    'pc_mapped': True,
+                }
+            elif ast is not None:
+                source_info = extract_source_info_from_pc(bug_pc, contract_name, ast)
+            else:
+                source_info = {
+                    'line_number': [0, 0],
+                    'fragment': "Unable to map source",
+                    'source_path': "unknown",
+                    'pc_mapped': False,
+                }
             
             # Create processed bug entry
             processed_bug = {

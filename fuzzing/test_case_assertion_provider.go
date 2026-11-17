@@ -13,6 +13,7 @@ import (
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/compilation/abiutils"
 	"github.com/crytic/medusa/compilation/platforms"
+	"github.com/crytic/medusa/fuzzing/bugfilter"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
@@ -468,6 +469,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					bugType:         bugType,
 					bugPC:           rawPC,
 					bugContractName: t.fuzzer.targetContractName,
+					bugContractId:   bugContractId,
 					callSequence:    &fullSequence,
 					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
 				}
@@ -505,8 +507,11 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 	return total_bugs_encountered > 0, nil
 }
 
-// getFalsePositivePCs gets false positive PCs for a contract's arithmetic bugs
-func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bugs []bugInfo) map[uint32]bool {
+// pythonFalsePositivePCs gets false positive PCs for a contract's arithmetic bugs with solidityutils/filter_fp.py,
+// which compiles the contract again with solc to map the PCs to source code. It is only used for an Etherscan target
+// whose source files medusa can't read, since PCs from another compiler's bytecode (such as Solar's) map to the wrong
+// code in solc's.
+func (t *AssertionTestCaseProvider) pythonFalsePositivePCs(contractName string, bugs []bugInfo) map[uint32]bool {
 	fpPCs := make(map[uint32]bool)
 
 	if len(bugs) == 0 {
@@ -624,6 +629,7 @@ func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
 	for _, v := range t.generalBugs {
 		validBugs = append(validBugs, v)
 	}
+	t.addBugSources(validBugs)
 
 	for _, v := range t.falsePositiveBugs {
 		fpBugs = append(fpBugs, v)
@@ -633,6 +639,10 @@ func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
 	for i, bug := range validBugs {
 		fmt.Printf("  CuEVM_BUG_REPORT %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
 			i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
+		if bug.bugSource != nil && !bug.bugSource.IsGenerated() {
+			fmt.Printf("    at %s:%d: %s\n", bug.bugSource.SourcePath, bug.bugSource.StartLine,
+				strings.TrimSpace(bug.bugSource.Fragment))
+		}
 	}
 
 	if len(fpBugs) > 0 {
@@ -646,38 +656,118 @@ func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
 	return validBugs
 }
 
-// processFalsePositives batches arithmetic bugs by contract and filters false positives
+// processFalsePositives filters false positives out of the arithmetic bugs. Each bug's PC is mapped to source code
+// with the source map of the bytecode medusa compiled and CuEVM ran, so solc and Solar builds are both handled (see
+// bugfilter.CheckArithmeticBug). False positives move from generalBugs to falsePositiveBugs.
 func (t *AssertionTestCaseProvider) processFalsePositives() {
-	// Group arithmetic bugs by contract with their types
-	contractBugs := make(map[string][]bugInfo)
-	bugIdMap := make(map[string]map[uint32]uint32) // contract -> pc -> bug_id
-
+	// Group arithmetic bugs by contract
+	contractBugs := make(map[string][]uint32) // contract -> bug ids
 	for bug_id, bug := range t.generalBugs {
-		if bug.bugType == CuEVM_INTEGER_BUG || bug.bugType == CuEVM_INTEGER_ADD || bug.bugType == CuEVM_INTEGER_SUB || bug.bugType == CuEVM_INTEGER_MUL {
-			contractName := bug.bugContractName
-			if contractBugs[contractName] == nil {
-				contractBugs[contractName] = []bugInfo{}
-				bugIdMap[contractName] = make(map[uint32]uint32)
-			}
-			contractBugs[contractName] = append(contractBugs[contractName], bugInfo{bug.bugPC, bug.bugType})
-			bugIdMap[contractName][bug.bugPC] = bug_id
+		if _, ok := arithmeticOp(bug.bugType); ok {
+			contractBugs[bug.bugContractName] = append(contractBugs[bug.bugContractName], bug_id)
 		}
 	}
 
-	// Process each contract's bugs in batch
-	for contractName, bugs := range contractBugs {
-		fpPCs := t.getFalsePositivePCs(contractName, bugs)
-		// fmt.Println("CuEVM Debug: fpPCs", fpPCs)
-		// Move false positive bugs to separate map
-		for pc := range fpPCs {
-			if bug_id, exists := bugIdMap[contractName][pc]; exists {
-				bug := t.generalBugs[bug_id]
-				delete(t.generalBugs, bug_id)
-				t.falsePositiveBugs[bug_id] = bug
-				fmt.Printf("CuEVM Debug: Filtered FP - Contract=%s, PC=%d\n", contractName, pc)
+	for contractName, bugIds := range contractBugs {
+		contract := t.contractDefinition(contractName)
+		if contract == nil {
+			fmt.Println("CuEVM Debug: no contract definition found", contractName)
+			for _, bug_id := range bugIds {
+				t.markFalsePositive(bug_id)
+			}
+			continue
+		}
+
+		// An Etherscan target's sources may not be on disk. Fall back to compiling it again with solc.
+		if t.isEtherscanTarget() && len(contract.Compilation().SourceCode[contract.SourcePath()]) == 0 {
+			bugs := make([]bugInfo, 0, len(bugIds))
+			for _, bug_id := range bugIds {
+				bugs = append(bugs, bugInfo{t.generalBugs[bug_id].bugPC, t.generalBugs[bug_id].bugType})
+			}
+			fpPCs := t.pythonFalsePositivePCs(contractName, bugs)
+			for _, bug_id := range bugIds {
+				if fpPCs[t.generalBugs[bug_id].bugPC] {
+					t.markFalsePositive(bug_id)
+				}
+			}
+			continue
+		}
+
+		for _, bug_id := range bugIds {
+			bug := t.generalBugs[bug_id]
+			op, _ := arithmeticOp(bug.bugType)
+			verdict := bugfilter.CheckArithmeticBug(contract.Compilation(), contract.CompiledContract(),
+				uint64(bug.bugPC), op)
+			bug.bugSource = verdict.Source
+			if verdict.FalsePositive {
+				fmt.Printf("CuEVM Debug: Filtered FP - Contract=%s, PC=%d, Reason=%s\n", contractName, bug.bugPC,
+					verdict.Reason)
+				t.markFalsePositive(bug_id)
+			} else {
+				fmt.Printf("CuEVM Debug: Bug kept - Contract=%s, PC=%d, %s\n", contractName, bug.bugPC, verdict.Reason)
 			}
 		}
 	}
+}
+
+// markFalsePositive moves a bug from generalBugs to falsePositiveBugs.
+func (t *AssertionTestCaseProvider) markFalsePositive(bug_id uint32) {
+	if bug, exists := t.generalBugs[bug_id]; exists {
+		delete(t.generalBugs, bug_id)
+		t.falsePositiveBugs[bug_id] = bug
+	}
+}
+
+// contractDefinition returns the definition of the contract with the given name, or nil if there is none.
+func (t *AssertionTestCaseProvider) contractDefinition(contractName string) *contracts.Contract {
+	for _, contract := range t.fuzzer.ContractDefinitions() {
+		if contract.Name() == contractName {
+			return contract
+		}
+	}
+	return nil
+}
+
+// isEtherscanTarget reports whether the fuzzer compiled an Etherscan JSON file.
+func (t *AssertionTestCaseProvider) isEtherscanTarget() bool {
+	platformConfig, err := t.fuzzer.config.Compilation.GetPlatformConfig()
+	if err != nil {
+		return false
+	}
+	cryticConfig, ok := platformConfig.(*platforms.CryticCompilationConfig)
+	return ok && cryticConfig.EtherscanJsonFile
+}
+
+// addBugSources maps the PC of each bug in the target contract to source code, for bugs.json and the logs. Bugs in
+// other contracts keep no source, since their PCs are in another contract's bytecode.
+func (t *AssertionTestCaseProvider) addBugSources(bugs []*AssertionTestCase) {
+	contract := t.contractDefinition(t.fuzzer.targetContractName)
+	if contract == nil {
+		return
+	}
+	for _, bug := range bugs {
+		if bug.bugSource != nil || bug.bugContractId != t.fuzzer.targetContractId || bug.bugPC == 0 {
+			continue
+		}
+		if source, err := contract.Compilation().SourceRangeAtPC(contract.CompiledContract(), uint64(bug.bugPC), true); err == nil {
+			bug.bugSource = source
+		}
+	}
+}
+
+// arithmeticOp returns the operation of an arithmetic bug type, or false for a bug type that is not arithmetic.
+func arithmeticOp(bugType uint32) (bugfilter.ArithmeticOp, bool) {
+	switch bugType {
+	case CuEVM_INTEGER_ADD:
+		return bugfilter.Add, true
+	case CuEVM_INTEGER_SUB:
+		return bugfilter.Sub, true
+	case CuEVM_INTEGER_MUL:
+		return bugfilter.Mul, true
+	case CuEVM_INTEGER_BUG:
+		return bugfilter.AnyArithmetic, true
+	}
+	return bugfilter.AnyArithmetic, false
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the
