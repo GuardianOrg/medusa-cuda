@@ -193,6 +193,22 @@ type solcExportData struct {
 	Contracts  map[string]solcExportContract `json:"contracts"`
 }
 
+// ReadCryticExports parses every crytic-compile solc export in a directory, one per compilation unit, as Compile does
+// after running crytic-compile. If foundryRoot is the root of a Foundry project, the file ids of units Foundry built
+// with a Solar that does not write ASTs are read from its build-info files, found as crytic-compile would find them
+// with the given crytic-compile arguments.
+func ReadCryticExports(exportDirectory string, foundryRoot string, cryticArgs []string) ([]types.Compilation, error) {
+	var foundryBuilds []foundryBuild
+	if foundryRoot != "" {
+		var err error
+		foundryBuilds, err = readFoundryBuilds(cryticArgs, foundryRoot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return readCryticExports(exportDirectory, foundryBuilds)
+}
+
 // readCryticExports parses every crytic-compile solc export in a directory, one per compilation unit, in file name
 // order. foundryBuilds are the Foundry build-infos crytic-compile read, if any.
 func readCryticExports(exportDirectory string, foundryBuilds []foundryBuild) ([]types.Compilation, error) {
