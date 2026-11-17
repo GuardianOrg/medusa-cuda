@@ -216,7 +216,10 @@ func (g *CallSequenceGenerator) InitializeNextSequence(fuzzing_loop_counter int)
 	unexecutedSequence := g.worker.fuzzer.corpus.UnexecutedCallSequence()
 	if unexecutedSequence != nil {
 		fmt.Println("CuEVM Debug: unexecutedSequence", unexecutedSequence)
-		g.baseSequence = *unexecutedSequence
+		// The GPU runs every sequence with exactly CallSequenceLength calls, so a shorter corpus sequence keeps its
+		// calls first and its remaining slots stay nil, to be filled with newly generated calls. A longer one is
+		// cut to that length.
+		copy(g.baseSequence, *unexecutedSequence)
 		return false, nil
 	}
 

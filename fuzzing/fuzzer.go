@@ -1592,6 +1592,14 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 					worker.callSequenceElements[seqIdx][elementIdx] = element
 					elementIdx++
 				}
+
+				// The GPU runs every sequence with exactly CallSequenceLength calls. A shorter sequence would leave
+				// nil slots (or calls left from an earlier loop) in the batch.
+				if elementIdx != f.config.Fuzzing.CallSequenceLength {
+					errChan <- fmt.Errorf("worker %d generated a sequence of %d calls, but the GPU batch needs %d",
+						workerIndex, elementIdx, f.config.Fuzzing.CallSequenceLength)
+					return
+				}
 			}
 
 			// Emit event indicating the worker is about to test new call sequences
@@ -2238,6 +2246,14 @@ func (f *Fuzzer) launchGPUKernel() error {
 	txBatchSizeCPU := f.sequencesPerCPUWorker * f.numCPUWorkers // we dont have to skip sequence for CPU
 	sequenceLength := f.config.Fuzzing.CallSequenceLength
 	gpuResults, err := f.runTransactionsGPU(f.workers, txBatchSizeGPU, sequenceLength)
+	// A failed batch stops the campaign, so it can't go on counting calls the GPU never ran.
+	if err != nil {
+		return err
+	}
+	// A batch with no results has nothing to process.
+	if gpuResults == nil {
+		return nil
+	}
 	// fmt.Println("CuEVM Debug: gpuResults", gpuResults.DebugString(), "err", err)
 	// fmt.Println("CuEVM Debug: markerOffsets", markerOffsets)
 	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
