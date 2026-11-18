@@ -21,8 +21,12 @@ const (
 	// #define BUG_LEAKING_ETHER 0x03
 	// #define BUG_ARBITRARY_CALL 0x04
 	// #define BUG_REENTRANCY 0x05
+	// #define BUG_ASSERTION 0x06
 	// #define BUG_INVALID_OPCODE 0xFF
-	CuEVM_ASSERTION_BUG_TYPE = 0xFF
+	// CuEVM_ASSERTION_BUG_TYPE is reported by the kernel's assertion oracle when a Solidity assert() fails, i.e. on a
+	// Panic(0x01) revert. CuEVM_INVALID_OPCODE covers asserts compiled to INVALID by older solc versions.
+	CuEVM_ASSERTION_BUG_TYPE = 0x06
+	CuEVM_INVALID_OPCODE     = 0xFF
 	CuEVM_INTEGER_BUG        = 0x01
 	CuEVM_SELF_DESTRUCT      = 0x02
 	CuEVM_LEAKING_ETHER      = 0x03
@@ -36,7 +40,7 @@ const (
 // bugTypeName returns a human-readable name for the bug type
 func bugTypeName(bugType uint32) string {
 	switch bugType {
-	case CuEVM_ASSERTION_BUG_TYPE:
+	case CuEVM_ASSERTION_BUG_TYPE, CuEVM_INVALID_OPCODE:
 		return "Assertion Failure"
 	case CuEVM_INTEGER_BUG, CuEVM_INTEGER_ADD, CuEVM_INTEGER_SUB, CuEVM_INTEGER_MUL:
 		return "Integer Overflow"

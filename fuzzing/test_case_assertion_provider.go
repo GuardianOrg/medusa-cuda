@@ -418,6 +418,11 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			*/
 			// general bugs including assertion failure, to be exported to json later
 			{
+				// An assertion bug is only a test failure when the configuration says so.
+				if (bugType == CuEVM_ASSERTION_BUG_TYPE || bugType == CuEVM_INVALID_OPCODE) &&
+					!t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig.FailOnAssertion {
+					continue
+				}
 				bug_id := rawPC<<16 | bugType<<8 | (bugContractId & 0xFF)
 				// fmt.Println("Bug Raw PC", rawPC, "Bug Type", bugType, "Bug Contract ID", bugContractId, "fuzzer target contract id", t.fuzzer.targetContractId)
 				if _, exists := t.generalBugs[bug_id]; exists {
