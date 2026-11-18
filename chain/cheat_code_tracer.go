@@ -32,6 +32,14 @@ type cheatCodeTracer struct {
 
 	// nativeTracer is the underlying tracer interface that the cheatcode tracer follows
 	nativeTracer *TestChainTracer
+
+	// recordingAccesses indicates whether storage accesses are being recorded for the record()/accesses() pair of
+	// cheat codes (forge-std's StdStorage uses them to discover storage slots).
+	recordingAccesses bool
+	// accessReads tracks the slots read per account since recording was enabled.
+	accessReads map[common.Address][]common.Hash
+	// accessWrites tracks the slots written per account since recording was enabled.
+	accessWrites map[common.Address][]common.Hash
 }
 
 // cheatCodeTracerCallFrame represents per-call-frame data traced by a cheatCodeTracer.
@@ -232,6 +240,38 @@ func (t *cheatCodeTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope t
 	if t.callDepth > 0 {
 		t.callFrames[t.callDepth-1].onNextFrameEnterHooks.Execute(true, true)
 	}
+
+	// Record storage accesses for the record()/accesses() cheat codes if recording is enabled.
+	if t.recordingAccesses && err == nil && scope != nil {
+		stackData := scope.StackData()
+		if len(stackData) > 0 {
+			// The slot is the topmost stack item for both SLOAD and SSTORE.
+			slot := common.Hash(stackData[len(stackData)-1].Bytes32())
+			switch vm.OpCode(op) {
+			case vm.SLOAD:
+				t.recordAccess(scope.Address(), slot, false)
+			case vm.SSTORE:
+				t.recordAccess(scope.Address(), slot, true)
+			}
+		}
+	}
+}
+
+// recordAccess stores a storage slot accessed by the given account for the record()/accesses() cheat codes.
+func (t *cheatCodeTracer) recordAccess(addr common.Address, slot common.Hash, write bool) {
+	target := t.accessReads
+	if write {
+		target = t.accessWrites
+	}
+	if target == nil {
+		return
+	}
+	for _, existing := range target[addr] {
+		if existing == slot {
+			return
+		}
+	}
+	target[addr] = append(target[addr], slot)
 }
 
 // CaptureTxEndSetAdditionalResults can be used to set additional results captured from execution tracing. If this

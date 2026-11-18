@@ -29,3 +29,6 @@ docs/book
 
 # Build results
 result
+
+# Local Claude skill: medusa-cuda knowledge base
+.claude/skills/medusa-cuda/

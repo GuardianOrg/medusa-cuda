@@ -671,8 +671,14 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 		}
 	}
 	// Fund all of our sender addresses in the genesis block
-
+	forkModeEnabled := f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled
 	for _, sender := range f.senders {
+		// In fork mode, senders that were extracted from the target's source as address constants are real
+		// contracts on the forked chain. Writing them into the genesis allocation shadows the fork state with an
+		// empty account, so calls into them return no data. Let the fork provide them instead.
+		if forkModeEnabled && f.fuzableReturnAddress[sender] {
+			continue
+		}
 		new_acc := types.Account{
 			Balance: big.NewInt(0),
 		}
@@ -742,7 +748,7 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 		if err != nil {
 			log.Printf("Failed to read attacker code: %v", err)
 		}
-		if err == nil {
+		if err == nil && !forkModeEnabled {
 			all_addresses := f.baseValueSet.Addresses()
 			all_integers := f.baseValueSet.Integers()
 			two256 := new(big.Int).Lsh(big.NewInt(1), 256)
@@ -1006,6 +1012,10 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 				// Ensure our transaction succeeded and, if it did not, attach an execution trace to it and re-run it.
 				// The execution trace will be returned so that it can be provided to the user for debugging
 				if block.MessageResults[0].Receipt.Status != types.ReceiptStatusSuccessful {
+					if res := block.MessageResults[0].ExecutionResult; res != nil {
+						fmt.Printf("CuEVM Debug: deploy failed contract=%s gasUsed=%d gasLimit=%d blockGasLimit=%d err=%v revertData=%x (%q)\n",
+							contractName, res.UsedGas, msg.GasLimit, testChain.BlockGasLimit, res.Err, res.Revert(), string(res.Revert()))
+					}
 					// Create a call sequence element to represent the failed contract deployment tx
 					cse := calls.NewCallSequenceElement(nil, msg, 0, 0)
 					cse.ChainReference = &calls.CallSequenceElementChainReference{
@@ -1041,14 +1051,12 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 						// break
 					}
 
-					// if err != nil {
-					// 	return nil, fmt.Errorf("failed to reset to genesis block: %v", err)
-					// } else {
-					// 	_, err = calls.ExecuteCallSequenceWithExecutionTracer(testChain, fuzzer.contractDefinitions, []*calls.CallSequenceElement{cse}, config.VeryVeryVerbose)
-					// 	if err != nil {
-					// 		return nil, fmt.Errorf("deploying %s returned a failed status: %v", contractName, block.MessageResults[0].ExecutionResult.Err)
-					// 	}
-					// }
+					// Re-run the deployment with an execution tracer so the caller can print a full trace of the
+					// failure instead of a bare "execution reverted".
+					_, err = calls.ExecuteCallSequenceWithExecutionTracer(testChain, fuzzer.contractDefinitions, []*calls.CallSequenceElement{cse}, config.VeryVeryVerbose)
+					if err != nil {
+						fmt.Printf("CuEVM Debug: traced replay of %s failed: %v\n", contractName, err)
+					}
 
 					// Return the execution error and the execution trace, if possible.
 					return cse.ExecutionTrace, fmt.Errorf("deploying %s returned a failed status: %v", contractName, block.MessageResults[0].ExecutionResult.Err)

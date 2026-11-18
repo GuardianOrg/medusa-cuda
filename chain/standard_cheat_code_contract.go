@@ -83,6 +83,10 @@ func getStandardCheatCodeContract(tracer *cheatCodeTracer) (*CheatCodeContract, 
 	if err != nil {
 		return nil, err
 	}
+	typeBytes32Slice, err := abi.NewType("bytes32[]", "", nil)
+	if err != nil {
+		return nil, err
+	}
 	typeString, err := abi.NewType("string", "", nil)
 	if err != nil {
 		return nil, err
@@ -297,6 +301,35 @@ func getStandardCheatCodeContract(tracer *cheatCodeTracer) (*CheatCodeContract, 
 			slot := inputs[1].([32]byte)
 			value := tracer.chain.State().GetState(account, slot)
 			return []any{value}, nil
+		},
+	)
+
+	// Record: starts recording all storage reads and writes, so that accesses() can report them.
+	// forge-std's StdStorage uses this pair to discover the storage slots backing a getter.
+	contract.addMethod(
+		"record", abi.Arguments{}, abi.Arguments{},
+		func(tracer *cheatCodeTracer, inputs []any) ([]any, *cheatCodeRawReturnData) {
+			tracer.accessReads = make(map[common.Address][]common.Hash)
+			tracer.accessWrites = make(map[common.Address][]common.Hash)
+			tracer.recordingAccesses = true
+			return nil, nil
+		},
+	)
+
+	// Accesses: returns the storage slots read and written for the given account since record() was called.
+	contract.addMethod(
+		"accesses", abi.Arguments{{Type: typeAddress}}, abi.Arguments{{Type: typeBytes32Slice}, {Type: typeBytes32Slice}},
+		func(tracer *cheatCodeTracer, inputs []any) ([]any, *cheatCodeRawReturnData) {
+			account := inputs[0].(common.Address)
+			reads := tracer.accessReads[account]
+			writes := tracer.accessWrites[account]
+			if reads == nil {
+				reads = make([]common.Hash, 0)
+			}
+			if writes == nil {
+				writes = make([]common.Hash, 0)
+			}
+			return []any{reads, writes}, nil
 		},
 	)
 

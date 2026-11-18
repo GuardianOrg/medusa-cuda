@@ -301,6 +301,13 @@ func AnalyzeSourceCoverage(compilations []types.Compilation, coverageMaps *Cover
 					return nil, fmt.Errorf("could not perform source code analysis due to error fetching runtime coverage map data: %v", err)
 				}
 
+				// Skip contracts that were never executed: they cannot contribute hits, and parsing their (often
+				// enormous) source maps dominates report time for large projects.
+				if (initCoverageMapData == nil || len(initCoverageMapData.executedMarkers) == 0) &&
+					(runtimeCoverageMapData == nil || len(runtimeCoverageMapData.executedMarkers) == 0) {
+					continue
+				}
+
 				// Parse the source map for this contract.
 				initSourceMap, err := types.ParseSourceMap(contract.SrcMapsInit)
 				if err != nil {
@@ -433,11 +440,17 @@ func analyzeContractSourceCoverage(compilation types.Compilation, sourceAnalysis
 func determineLinesCovered(cm *ContractCoverageMap, bytecode []byte, logger *logging.Logger) ([]uint64, []uint64) {
 	indexToOffset := getInstructionIndexToOffsetLookup(bytecode)
 
-	// executedMakers as src -> dst -> hit count, and dst -> src -> hit count
-	execMarkersSrcDst, execMarkersDstSrc := getExecMarkersMapping(cm.executedMarkers)
-
 	successfulHits := make([]uint64, len(indexToOffset))
 	revertedHits := make([]uint64, len(indexToOffset))
+
+	// If this contract was never entered, every instruction has zero hits. Returning here avoids a full pass over
+	// the bytecode for the many contracts a large project compiles but never executes, which dominates report time.
+	if cm == nil || len(cm.executedMarkers) == 0 {
+		return successfulHits, revertedHits
+	}
+
+	// executedMakers as src -> dst -> hit count, and dst -> src -> hit count
+	execMarkersSrcDst, execMarkersDstSrc := getExecMarkersMapping(cm.executedMarkers)
 
 	// Traverse the instructions from top to bottom, keeping track of hit count as we go
 	hit := uint64(0)
